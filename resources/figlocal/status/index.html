@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>figlocal</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: radial-gradient(circle at top, #1a2332 0%, #0d1117 55%);
+        color: #e6edf3;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+      }
+      .card {
+        width: min(440px, 100%);
+        background: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 16px;
+        padding: 28px 32px;
+        box-shadow: 0 24px 48px rgba(0, 0, 0, 0.35);
+      }
+      .logo {
+        font-size: 28px;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+        margin: 0 0 8px;
+      }
+      .logo span {
+        color: #3fb950;
+      }
+      .tagline {
+        margin: 0 0 24px;
+        color: #8b949e;
+        font-size: 15px;
+      }
+      .status {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 12px 14px;
+        border-radius: 10px;
+        background: #0d1117;
+        border: 1px solid #238636;
+        margin-bottom: 20px;
+        font-size: 14px;
+      }
+      .dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: #3fb950;
+        box-shadow: 0 0 12px #3fb950;
+      }
+      ol {
+        margin: 0;
+        padding-left: 20px;
+        color: #c9d1d9;
+        line-height: 1.6;
+        font-size: 14px;
+      }
+      code {
+        background: #21262d;
+        padding: 2px 6px;
+        border-radius: 6px;
+        font-size: 13px;
+      }
+      .hint {
+        margin-top: 20px;
+        font-size: 12px;
+        color: #6e7681;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1 class="logo"><span>fig</span>local</h1>
+      <p class="tagline">Local shell autocomplete — no cloud login.</p>
+      <div class="status">
+        <span class="dot" aria-hidden="true"></span>
+        <span>Background service is running</span>
+      </div>
+      <ol>
+        <li>In Terminal, reload your shell: <code>exec zsh</code></li>
+        <li>Type a command and press <code>Tab</code> for suggestions</li>
+        <li>From CLI: <code>figlocal</code> or <code>q launch</code></li>
+      </ol>
+      <p class="hint">You can close this window — autocomplete keeps running in the menu bar.</p>
+    </main>
+  </body>
+</html>

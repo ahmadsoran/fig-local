@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+# Install local-only build into ~/Applications/FigLocal.app and ~/.local/bin
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+APP="$HOME/Applications/FigLocal.app"
+BIN="$HOME/.local/bin"
+
+[[ -x "$ROOT/target/release/fig_desktop" ]] || {
+  echo "Run ./scripts/build-local-macos.sh first"
+  exit 1
+}
+[[ -x "$ROOT/target/release/figterm" ]] || {
+  echo "Missing target/release/figterm — run build-local-macos.sh (builds qterm)"
+  exit 1
+}
+[[ -d "$ROOT/packages/autocomplete-app/dist" ]] || {
+  echo "Missing packages/autocomplete-app/dist — run build-local-macos.sh"
+  exit 1
+}
+
+"$ROOT/scripts/fetch-specs.sh"
+
+echo "==> App bundle at $APP"
+rm -rf "$APP"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/autocomplete" "$APP/Contents/Resources/specs"
+cp "$ROOT/target/release/fig_desktop" "$APP/Contents/MacOS/fig_desktop"
+cp "$ROOT/target/release/q_cli" "$APP/Contents/MacOS/q"
+cp "$ROOT/target/release/figterm" "$APP/Contents/MacOS/qterm"
+chmod +x "$APP/Contents/MacOS/"*
+rsync -a "$ROOT/packages/autocomplete-app/dist/" "$APP/Contents/Resources/autocomplete/"
+rsync -a "$ROOT/vendor/specs/" "$APP/Contents/Resources/specs/"
+
+ICON_SRC="$ROOT/crates/fig_desktop/icons"
+ICONSET="$APP/Contents/Resources/FigLocal.iconset"
+ICNS="$APP/Contents/Resources/FigLocal.icns"
+rm -rf "$ICONSET"
+mkdir -p "$ICONSET"
+cp "$ICON_SRC/32x32.png" "$ICONSET/icon_16x16@2x.png"
+cp "$ICON_SRC/128x128.png" "$ICONSET/icon_128x128.png"
+cp "$ICON_SRC/128x128@2x.png" "$ICONSET/icon_256x256.png"
+cp "$ICON_SRC/128x128@2x.png" "$ICONSET/icon_128x128@2x.png"
+cp "$ICON_SRC/icon.png" "$ICONSET/icon_512x512.png" 2>/dev/null || cp "$ICON_SRC/128x128@2x.png" "$ICONSET/icon_512x512.png"
+iconutil -c icns "$ICONSET" -o "$ICNS"
+rm -rf "$ICONSET"
+
+cat > "$APP/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleExecutable</key>
+  <string>fig_desktop</string>
+  <key>CFBundleIdentifier</key>
+  <string>dev.figlocal.autocomplete</string>
+  <key>CFBundleName</key>
+  <string>FigLocal</string>
+  <key>CFBundleDisplayName</key>
+  <string>FigLocal</string>
+  <key>CFBundleIconFile</key>
+  <string>FigLocal</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>1.0.0</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>13.0</string>
+  <key>LSUIElement</key>
+  <false/>
+  <key>LSEnvironment</key>
+  <dict>
+    <key>FIG_LOCAL_ONLY</key>
+    <string>1</string>
+    <key>Q_DISABLE_TELEMETRY</key>
+    <string>1</string>
+  </dict>
+</dict>
+</plist>
+PLIST
+printf 'APPL????' > "$APP/Contents/PkgInfo"
+
+cat > "$APP/Contents/MacOS/figlocal-open" <<'OPEN'
+#!/usr/bin/env bash
+APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+export FIG_LOCAL_ONLY=1 Q_DISABLE_TELEMETRY=1
+if pgrep -f "${APP_DIR}/MacOS/fig_desktop" >/dev/null 2>&1; then
+  osascript -e 'display notification "Already running. Look for FigLocal in the Dock or menu bar (⋯)." with title "FigLocal"'
+  open -a "${APP_DIR}/.." 2>/dev/null || true
+  exit 0
+fi
+open -a "${APP_DIR}/.." --args --no-dashboard --ignore-immediate-update
+sleep 1
+if pgrep -f "${APP_DIR}/MacOS/fig_desktop" >/dev/null 2>&1; then
+  osascript -e 'display notification "Running in background — autocomplete works in Terminal after exec zsh." with title "FigLocal"'
+else
+  osascript -e 'display alert "FigLocal failed to start" message "Run: ~/Applications/FigLocal.app/Contents/MacOS/fig_desktop --no-dashboard" as critical'
+  exit 1
+fi
+OPEN
+chmod +x "$APP/Contents/MacOS/figlocal-open"
+ln -sf "$APP/Contents/MacOS/figlocal-open" "$BIN/figlocal"
+
+echo "==> CLI symlinks in $BIN"
+mkdir -p "$BIN"
+ln -sf "$APP/Contents/MacOS/q" "$BIN/q"
+ln -sf "$APP/Contents/MacOS/qterm" "$BIN/qterm"
+ln -sf "$APP/Contents/MacOS/fig_desktop" "$BIN/fig_desktop"
+
+ZSHRC="${ZDOTDIR:-$HOME}/.zshrc"
+export FIG_LOCAL_ONLY=1
+export Q_DISABLE_TELEMETRY=1
+Q_SHELL_DIR="$HOME/Library/Application Support/amazon-q/shell"
+mkdir -p "$Q_SHELL_DIR"
+for f in zshrc.pre.zsh zshrc.post.zsh; do
+  path="$Q_SHELL_DIR/$f"
+  touch "$path"
+  grep -q 'FIG_LOCAL_ONLY' "$path" 2>/dev/null || {
+    printf '%s\n' 'export FIG_LOCAL_ONLY=1' 'export Q_DISABLE_TELEMETRY=1' >> "$path"
+  }
+done
+echo "==> Shell integrations (amazon-q pre/post in $ZSHRC)"
+"$APP/Contents/MacOS/q" integrations install dotfiles zsh || true
+
+pkill -x fig_desktop 2>/dev/null || true
+"$APP/Contents/MacOS/figlocal-open"
+
+echo ""
+echo "Installed FigLocal.app"
+echo "  figlocal          # start + notification (or open ~/Applications/FigLocal.app)"
+echo "  No main window is normal — local autocomplete only."
+echo "  exec zsh          # reload shell in terminals"
+echo "  q doctor"
