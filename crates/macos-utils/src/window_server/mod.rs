@@ -68,6 +68,7 @@ pub use ui_element::{
     CGWindowInfo,
     CGWindowLevelForKey,
     UIElement,
+    largest_window_excluding,
     largest_window_for_pid,
     window_bounds_by_id,
 };

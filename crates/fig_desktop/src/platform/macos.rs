@@ -46,11 +46,14 @@ use macos_utils::caret_position::{
     CaretPosition,
     get_caret_position,
 };
+use accessibility_sys::AXUIElementCreateApplication;
+use fig_proto::local::TerminalCursorCoordinates;
 use macos_utils::applications::frontmost_application;
 use macos_utils::window_server::{
     CGWindowInfo,
     CGWindowLevelForKey,
     UIElement,
+    largest_window_excluding,
     largest_window_for_pid,
     window_bounds_by_id,
 };
@@ -709,7 +712,7 @@ impl PlatformStateImpl {
     }
 
     pub(super) fn refresh_window_position(&self) -> anyhow::Result<()> {
-        let (edit_cursor, shell_pid) = Self::figterm_cursor_and_shell_pid();
+        let (edit_cursor, shell_pid, term_coords) = Self::figterm_position_hints();
         let mut guard = self.focused_window.lock().unwrap();
         let mut active_window = guard.as_mut();
 
@@ -739,23 +742,37 @@ impl PlatformStateImpl {
             return Ok(());
         }
 
+        let terminal_window = Self::resolve_terminal_window(active_window.as_deref(), shell_pid);
+        let bounds = terminal_window.as_ref().map(|w| w.bounds);
+        let owner_pid = terminal_window.as_ref().map(|w| w.owner_pid as i32);
+
+        // 1) Real caret from Accessibility (best — Cursor xterm textarea).
         let mut caret = if is_xterm {
             active_window
                 .as_mut()
                 .and_then(|w| w.get_x_term_cursor_elem())
                 .and_then(|c| c.frame().ok())
                 .map(Rect::from)
+                .or_else(|| owner_pid.and_then(Self::xterm_caret_for_pid))
         } else {
             self.get_cursor_position()
         };
 
-        let terminal_window = Self::resolve_terminal_window(active_window.as_deref(), shell_pid);
-        let bounds = terminal_window.as_ref().map(|w| w.bounds);
+        // 2) Map figterm cell cursor into the host window.
+        if caret.is_none() {
+            if let (Some(bounds), Some(coords)) = (bounds.as_ref(), term_coords.as_ref()) {
+                caret = Self::caret_from_terminal_cells(bounds, coords, bundle_id.as_deref());
+            }
+        }
 
-        // Without Accessibility, AX caret APIs fail — place on the terminal prompt line via window bounds.
+        // 3) Last resort: prompt-line estimate (IDE-aware left inset for sidebar).
         if caret.is_none() {
             if let Some(bounds) = bounds {
-                caret = Some(Self::estimate_caret_on_prompt_line(&bounds, edit_cursor));
+                caret = Some(Self::estimate_caret_on_prompt_line(
+                    &bounds,
+                    edit_cursor,
+                    bundle_id.as_deref(),
+                ));
             }
         }
 
@@ -798,19 +815,87 @@ impl PlatformStateImpl {
         Ok(())
     }
 
-    /// Edit-buffer cursor + shell pid from the most recent figterm session.
-    fn figterm_cursor_and_shell_pid() -> (i64, Option<i32>) {
+    /// Edit-buffer cursor, shell pid, and viewport cell coords from figterm.
+    fn figterm_position_hints() -> (i64, Option<i32>, Option<TerminalCursorCoordinates>) {
         let Some(state) = FIGTERM_STATE.get() else {
-            return (0, None);
+            return (0, None, None);
         };
         state
             .most_recent()
             .map(|session| {
                 let cursor = session.edit_buffer.cursor;
                 let pid = session.context.as_ref().and_then(|ctx| ctx.pid);
-                (cursor, pid)
+                let coords = session.terminal_cursor_coordinates.clone();
+                (cursor, pid, coords)
             })
-            .unwrap_or((0, None))
+            .unwrap_or((0, None, None))
+    }
+
+    /// Find Cursor/VS Code xterm helper textarea caret via Accessibility for a PID.
+    fn xterm_caret_for_pid(pid: i32) -> Option<Rect> {
+        if !accessibility_is_enabled() {
+            return None;
+        }
+        let app = UIElement::from(unsafe { AXUIElementCreateApplication(pid) });
+        app.enable_screen_reader_accessibility().ok();
+        let tree = app.find_x_term_caret_tree().ok()?;
+        let caret_elem = tree.first()?;
+        caret_elem.frame().ok().map(Rect::from)
+    }
+
+    fn is_ide_host(bundle_id: Option<&str>) -> bool {
+        bundle_id.is_some_and(|id| {
+            id.contains("todesktop")
+                || id.contains("VSCode")
+                || id.contains("Cursor")
+                || id == "com.microsoft.VSCode"
+                || id == "com.microsoft.VSCodeInsiders"
+        })
+    }
+
+    /// Map figterm viewport cells into the host window.
+    /// Standalone terminals: grid starts at the top (prompt is near the title bar).
+    /// IDE hosts: grid is pinned to the bottom-right pane (integrated terminal).
+    fn caret_from_terminal_cells(
+        bounds: &CGRect,
+        coords: &TerminalCursorCoordinates,
+        bundle_id: Option<&str>,
+    ) -> Option<Rect> {
+        let cols = coords.xpixel;
+        let rows = coords.ypixel;
+        if cols <= 0 || rows <= 0 {
+            return None;
+        }
+
+        const CELL_W: f64 = 8.0;
+        const CELL_H: f64 = 18.0;
+
+        let ide = Self::is_ide_host(bundle_id);
+        let (origin_x, origin_y, cell_w, cell_h) = if ide {
+            let term_w = (cols as f64 * CELL_W).min(bounds.size.width - 8.0).max(80.0);
+            let term_h = (rows as f64 * CELL_H).min(bounds.size.height - 8.0).max(40.0);
+            (
+                bounds.origin.x + (bounds.size.width - term_w).max(0.0),
+                bounds.origin.y + (bounds.size.height - term_h).max(0.0),
+                term_w / cols as f64,
+                term_h / rows as f64,
+            )
+        } else {
+            // Title bar + tab strip. Row 0 is the first line under that chrome.
+            let top = 36.0;
+            let left = 8.0;
+            let avail_w = (bounds.size.width - left - 8.0).max(80.0);
+            let avail_h = (bounds.size.height - top - 8.0).max(40.0);
+            (bounds.origin.x + left, bounds.origin.y + top, avail_w / cols as f64, avail_h / rows as f64)
+        };
+
+        let col = (coords.x as f64).clamp(0.0, (cols - 1) as f64);
+        let row = (coords.y as f64).clamp(0.0, (rows - 1) as f64);
+
+        Some(Rect {
+            position: LogicalPosition::new(origin_x + col * cell_w, origin_y + row * cell_h).into(),
+            size: LogicalSize::new(cell_w.max(DEFAULT_CARET_WIDTH), cell_h.max(14.0)).into(),
+        })
     }
 
     /// Resolve the terminal/host window without requiring Accessibility.
@@ -844,9 +929,9 @@ impl PlatformStateImpl {
         let front = frontmost_application()?;
         let bundle = front.bundle_identifier.as_deref().unwrap_or("");
         if bundle == fig_util::local_only::app_bundle_id() || bundle == "dev.figlocal.autocomplete" {
-            return None;
+            return Self::largest_other_window(front.process_identifier);
         }
-        largest_window_for_pid(front.process_identifier)
+        largest_window_for_pid(front.process_identifier).or_else(|| Self::largest_other_window(front.process_identifier))
     }
 
     fn pid_and_parents(start: i32) -> Vec<i32> {
@@ -870,23 +955,31 @@ impl PlatformStateImpl {
         out
     }
 
-    /// Place caret on the visible prompt line (bottom content area) using buffer cursor for X.
-    fn estimate_caret_on_prompt_line(bounds: &CGRect, edit_cursor: i64) -> Rect {
-        const LEFT_PAD: f64 = 14.0;
+    fn largest_other_window(exclude_pid: i32) -> Option<CGWindowInfo> {
+        let self_pid = std::process::id() as i32;
+        largest_window_excluding(&[exclude_pid, self_pid])
+    }
+
+    /// Place caret on the prompt line using buffer cursor; IDE apps inset past the sidebar.
+    fn estimate_caret_on_prompt_line(bounds: &CGRect, edit_cursor: i64, bundle_id: Option<&str>) -> Rect {
         const BOTTOM_PAD: f64 = 10.0;
         const LINE_H: f64 = 18.0;
         const CHAR_W: f64 = 8.0;
 
+        let is_ide = Self::is_ide_host(bundle_id);
+        // IDE: prompt lives in the right/bottom pane. Standalone terminal: first lines under the title bar.
+        let left_pad = if is_ide { bounds.size.width * 0.42 } else { 12.0 };
+        let y = if is_ide {
+            bounds.origin.y + bounds.size.height - BOTTOM_PAD - LINE_H
+        } else {
+            bounds.origin.y + 52.0
+        };
+
         let col = edit_cursor.max(0) as f64;
-        let mut x = bounds.origin.x + LEFT_PAD + col * CHAR_W;
+        let mut x = bounds.origin.x + left_pad + col * CHAR_W;
         let max_x = bounds.origin.x + bounds.size.width - 48.0;
-        if x > max_x {
-            x = max_x;
-        }
-        if x < bounds.origin.x + LEFT_PAD {
-            x = bounds.origin.x + LEFT_PAD;
-        }
-        let y = bounds.origin.y + bounds.size.height - BOTTOM_PAD - LINE_H;
+        let min_x = bounds.origin.x + left_pad.min(bounds.size.width * 0.35);
+        x = x.clamp(min_x, max_x);
 
         Rect {
             position: LogicalPosition::new(x, y).into(),

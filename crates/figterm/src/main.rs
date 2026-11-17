@@ -208,25 +208,27 @@ fn shell_state_to_context(shell_state: &ShellState) -> local::ShellContext {
     }
 }
 
-#[allow(clippy::needless_return)]
-fn get_cursor_coordinates(terminal: &dyn Terminal) -> Option<TerminalCursorCoordinates> {
-    cfg_if! {
-        if #[cfg(target_os = "windows")] {
-            use term::cast;
-
-            let coordinate = terminal.get_cursor_coordinate().ok()?;
-            let screen_size = terminal.get_screen_size().ok()?;
-            return Some(TerminalCursorCoordinates {
-                x: cast(coordinate.cols).ok()?,
-                y: cast(coordinate.rows).ok()?,
-                xpixel: cast(screen_size.xpixel).ok()?,
-                ypixel: cast(screen_size.ypixel).ok()?,
-            });
-        } else {
-            let _terminal = terminal;
-            return None;
-        }
+/// Cursor cell + viewport size from the alacritty grid (works on all platforms).
+/// `x`/`y` = cursor column/row in the viewport. `xpixel`/`ypixel` = total cols/rows
+/// (repurposed so desktop can map cells into the host window without Accessibility).
+fn get_cursor_coordinates_from_term<T: EventListener>(term: &Term<T>) -> Option<TerminalCursorCoordinates> {
+    let cols = term.columns();
+    let rows = term.screen_lines();
+    if cols == 0 || rows == 0 {
+        return None;
     }
+
+    let point = term.grid().cursor.point;
+    let display_offset = term.grid().display_offset() as i32;
+    let viewport_row = (point.line.0 + display_offset).clamp(0, rows as i32 - 1);
+    let viewport_col = (point.column.0 as i32).clamp(0, cols as i32 - 1);
+
+    Some(TerminalCursorCoordinates {
+        x: viewport_col,
+        y: viewport_row,
+        xpixel: cols as i32,
+        ypixel: rows as i32,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -877,7 +879,7 @@ fn figterm_main(command: Option<&[String]>) -> Result<()> {
                             }
 
                             if can_send_edit_buffer(&term) {
-                                let cursor_coordinates = get_cursor_coordinates(&terminal);
+                                let cursor_coordinates = get_cursor_coordinates_from_term(&term);
                                 if let Err(err) = send_edit_buffer(&term, &remote_sender, cursor_coordinates).await {
                                     warn!("Failed to send edit buffer: {err}");
                                 }
@@ -935,7 +937,7 @@ fn figterm_main(command: Option<&[String]>) -> Result<()> {
                 _ = edit_buffer_interval.tick() => {
                     let send_eb = INSERTION_LOCKED_AT.read().unwrap().is_some();
                     if send_eb && can_send_edit_buffer(&term) {
-                        let cursor_coordinates = get_cursor_coordinates(&terminal);
+                        let cursor_coordinates = get_cursor_coordinates_from_term(&term);
                         if let Err(err) = send_edit_buffer(&term, &remote_sender, cursor_coordinates).await {
                             warn!(%err, "Failed to send edit buffer");
                         }

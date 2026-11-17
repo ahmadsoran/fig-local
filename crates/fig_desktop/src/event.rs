@@ -145,6 +145,8 @@ impl WindowEvent {
         matches!(
             self,
             WindowEvent::Hide
+                | WindowEvent::Show
+                | WindowEvent::UpdateWindowGeometry { .. }
                 | WindowEvent::SetEnabled(_)
                 // TODO: we really shouldnt need to allow these to be called when disabled, 
                 // however we allow them at the moment because notification listeners are

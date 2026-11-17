@@ -354,8 +354,58 @@ pub fn largest_window_for_pid(pid: i32) -> Option<CGWindowInfo> {
                 _ => continue,
             };
             let level = get_num(&window, kCGWindowLayer).unwrap_or(0);
-            // Skip menu bar / overlay layers; keep normal windows (layer 0) and a few specials.
-            if level > 0 {
+            // Skip menu bar, dock, and overlays. Keep normal and floating app windows.
+            if !(0..=8).contains(&level) {
+                continue;
+            }
+            let Some(window_id) = get_num(&window, kCGWindowNumber).map(|id| id as CGWindowID) else {
+                continue;
+            };
+            let Some(bounds) = get_value::<CFDictionary>(&window, kCGWindowBounds) else {
+                continue;
+            };
+            let Some(bounds_rect) = CGRect::from_dict_representation(&bounds) else {
+                continue;
+            };
+            let area = bounds_rect.size.width * bounds_rect.size.height;
+            if area < 200.0 * 100.0 {
+                continue;
+            }
+            if area > best_area {
+                best_area = area;
+                best = Some(CGWindowInfo {
+                    owner_pid: owner_pid as u64,
+                    window_id,
+                    bounds: bounds_rect,
+                    level,
+                });
+            }
+        }
+
+        best
+    }
+}
+
+/// Largest normal on-screen window whose owner is not in `exclude_pids`.
+pub fn largest_window_excluding(exclude_pids: &[i32]) -> Option<CGWindowInfo> {
+    unsafe {
+        let windows = CFArray::<CFDictionary>::wrap_under_create_rule(display::CGWindowListCopyWindowInfo(
+            display::kCGWindowListOptionOnScreenOnly | display::kCGWindowListExcludeDesktopElements,
+            display::kCGNullWindowID,
+        ));
+
+        let mut best: Option<CGWindowInfo> = None;
+        let mut best_area = 0.0_f64;
+
+        for window in windows.iter() {
+            let Some(owner_pid) = get_num(&window, kCGWindowOwnerPID) else {
+                continue;
+            };
+            if exclude_pids.iter().any(|pid| *pid as i64 == owner_pid) {
+                continue;
+            }
+            let level = get_num(&window, kCGWindowLayer).unwrap_or(0);
+            if !(0..=8).contains(&level) {
                 continue;
             }
             let Some(window_id) = get_num(&window, kCGWindowNumber).map(|id| id as CGWindowID) else {
